@@ -1,0 +1,236 @@
+/* ===============================
+   VINTAGE LIGHT CREAM UI
+   =============================== */
+
+:root {
+  --bg-primary: #faf7f2;     /* paper cream */
+  --bg-secondary: #f1eee8;   /* card background */
+  --bg-tertiary: #e6e2da;
+
+  --text-primary: #1a1a1a;
+  --text-secondary: #555555;
+  --text-tertiary: #777777;
+
+  --border-color: #c8c4bc;
+  --shadow: rgba(0,0,0,0.06);
+}
+
+/* Dark mode still neutral */
+[data-theme="dark"] {
+  --bg-primary: #1b1b1b;
+  --bg-secondary: #232323;
+  --bg-tertiary: #2c2c2c;
+
+  --text-primary: #f2f2f2;
+  --text-secondary: #bbbbbb;
+  --text-tertiary: #888888;
+
+  --border-color: #444444;
+}
+
+/* RESET */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+/* BODY */
+body {
+  font-family: "Courier New", Courier, monospace;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  height: 100vh;
+}
+
+/* LAYOUT */
+.container {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* HEADER */
+.header {
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.header h1 {
+  font-size: 1rem;
+  letter-spacing: 1.5px;
+}
+
+.theme-toggle {
+  border: 1px solid var(--border-color);
+  background: transparent;
+  padding: 0.3rem 0.7rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+/* MAIN */
+.main-content {
+  flex: 1;
+  padding: 1.25rem;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+}
+
+@media (max-width: 900px) {
+  .main-content {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* PANELS */
+.status-card,
+.recording-card,
+.recording-item {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  padding: 1rem;
+}
+
+/* STATUS HEADER */
+.status-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.status-header h2 {
+  font-size: 0.9rem;
+  letter-spacing: 1px;
+}
+
+/* STATUS INDICATOR */
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--border-color);
+}
+
+/* STATUS DETAILS */
+.status-details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 0.75rem;
+}
+
+.status-item {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.8rem;
+  padding: 0.3rem 0;
+  border-bottom: 1px dashed var(--border-color);
+}
+
+.status-item:last-child {
+  border-bottom: none;
+}
+
+/* BUTTONS */
+.control-buttons {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.btn {
+  flex: 1;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.75rem;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  cursor: pointer;
+  text-transform: uppercase;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--bg-tertiary);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* PERMISSIONS */
+.permissions-section {
+  margin-top: 0.75rem;
+}
+
+.permissions-status {
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+/* RECORDING CONTROLS */
+.recording-card h3 {
+  font-size: 0.85rem;
+  text-align: center;
+  margin-bottom: 0.5rem;
+}
+
+.recording-timer {
+  text-align: center;
+  font-size: 1.6rem;
+  letter-spacing: 2px;
+  margin: 0.75rem 0;
+}
+
+/* RECORDINGS SECTION */
+.recordings-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.recordings-header h2 {
+  font-size: 0.9rem;
+}
+
+.recordings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+/* RECORDING ITEM */
+.recording-item {
+  font-size: 0.75rem;
+}
+
+.recording-item:hover {
+  background: var(--bg-tertiary);
+}
+
+/* EMPTY STATE */
+.no-recordings {
+  text-align: center;
+  padding: 1.5rem;
+  border: 1px dashed var(--border-color);
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+}
+
+/* SCROLLBAR */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+}

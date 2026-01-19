@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WhatsApp Call Recorder</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-content">
+        <h1>WhatsApp Call Recorder</h1>
+        <button id="themeToggle" class="theme-toggle" title="Toggle theme">
+          <span class="theme-icon">🌙</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <!-- Control Panel -->
+      <section class="control-panel">
+        <div class="status-card">
+          <div class="status-header">
+            <h2>Recording Status</h2>
+            <div class="status-indicator" id="statusIndicator">
+              <span class="status-dot"></span>
+              <span class="status-text">Idle</span>
+            </div>
+          </div>
+          
+          <div class="status-details">
+            <div class="status-item">
+              <span class="status-label">WhatsApp:</span>
+              <span class="status-value" id="whatsappStatus">Not Running</span>
+            </div>
+            <div class="status-item">
+              <span class="status-label">Call Status:</span>
+              <span class="status-value" id="callStatus">No Call</span>
+            </div>
+            <div class="status-item">
+              <span class="status-label">Recording:</span>
+              <span class="status-value" id="recordingStatus">Not Recording</span>
+            </div>
+          </div>
+
+          <div class="control-buttons">
+            <button id="startBtn" class="btn btn-primary">
+              <span class="btn-icon">▶</span>
+              Start Monitoring
+            </button>
+            <button id="stopBtn" class="btn btn-secondary" disabled>
+              <span class="btn-icon">⏹</span>
+              Stop Monitoring
+            </button>
+          </div>
+
+          <div class="permissions-section">
+            <button id="checkPermissionsBtn" class="btn btn-outline">
+              Check Permissions
+            </button>
+            <div id="permissionsStatus" class="permissions-status"></div>
+          </div>
+        </div>
+
+        <!-- Recording Controls (shown when call detected) -->
+        <div class="recording-controls" id="recordingControls" style="display: none;">
+          <div class="recording-card">
+            <h3>🎥 Auto-Recording Active</h3>
+            <p style="color: var(--text-secondary); margin: 0.5rem 0;">Recording will automatically start when call begins and stop when call ends.</p>
+            <div class="recording-timer" id="recordingTimer">00:00:00</div>
+            <div class="recording-info-text" style="text-align: center; color: var(--text-secondary); font-size: 0.875rem; margin-top: 1rem;">
+              <p>✓ Recording in progress</p>
+              <p style="margin-top: 0.5rem;">The recording will save automatically when the call ends</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Recordings List -->
+      <section class="recordings-section">
+        <div class="recordings-header">
+          <h2>Recordings</h2>
+          <button id="refreshBtn" class="btn btn-outline btn-sm">
+            <span class="btn-icon">🔄</span>
+            Refresh
+          </button>
+        </div>
+        
+        <div id="recordingsList" class="recordings-list">
+          <!-- Recordings will be loaded here -->
+        </div>
+
+        <div id="noRecordings" class="no-recordings">
+          <div class="no-recordings-icon">📹</div>
+          <p>No recordings available</p>
+          <small>Start monitoring to record WhatsApp calls</small>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
