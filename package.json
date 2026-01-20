@@ -30,6 +30,7 @@
   "build": {
     "appId": "com.yourcompany.whatsapp-recorder",
     "productName": "WhatsApp Call Recorder",
+    "publish": null,
     "directories": {
       "output": "dist"
     },
