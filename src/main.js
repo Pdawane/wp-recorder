@@ -1,8 +1,11 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer, systemPreferences, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, systemPreferences, shell, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const ffmpeg = require('fluent-ffmpeg');
-const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+const ffmpegPath = require('ffmpeg-static');
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
@@ -11,6 +14,10 @@ let isRecording = false;
 let monitoringInterval;
 let recordingsPath;
 let previousCallState = false;
+let callStateHistory = [];
+let consecutiveCallDetections = 0;
+let consecutiveNoCallDetections = 0;
+const DETECTION_THRESHOLD = 2;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -21,13 +28,24 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js')
+      preload: path.join(__dirname, 'preload.js'),
+      enableRemoteModule: false,
+      webSecurity: true
     },
     icon: path.join(__dirname, '../assets/icon.png')
   });
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
   mainWindow.webContents.openDevTools();
+  
+  mainWindow.webContents.session.setPermissionRequestHandler((webContents, permission, callback) => {
+    if (permission === 'media' || permission === 'audioCapture' || permission === 'displayCapture') {
+      callback(true);
+    } else {
+      callback(false);
+    }
+  });
+  
   console.log('Window created successfully');
 }
 
@@ -39,123 +57,271 @@ function setupRecordingsDirectory() {
     fs.mkdirSync(recordingsPath, { recursive: true });
   }
   
+  console.log('📁 Recordings directory:', recordingsPath);
   return recordingsPath;
 }
 
-async function detectWhatsAppWindow() {
+async function detectWhatsAppCall() {
   try {
     const sources = await desktopCapturer.getSources({
       types: ['window'],
       thumbnailSize: { width: 150, height: 150 }
     });
     
-    console.log(`Found ${sources.length} windows`);
-    
-    const whatsappWindow = sources.find(source => {
+    const whatsappWindows = sources.filter(source => {
       const name = source.name.toLowerCase();
-      console.log('Window:', source.name);
-      return name.includes('whatsapp') && !name.includes('call recorder');
+      return (name.includes('whatsapp') || name.includes('call')) && 
+             !name.includes('call recorder') &&
+             !name.includes('electron');
     });
     
-    if (whatsappWindow) {
-      console.log('WhatsApp window found:', whatsappWindow.name);
-      
-      const windowTitle = whatsappWindow.name.toLowerCase();
-      const hasDash = windowTitle.includes(' - ');
-      const hasVideoCall = windowTitle.includes('video call');
-      const hasVoiceCall = windowTitle.includes('voice call');
-      const hasAudioCall = windowTitle.includes('audio call');
-      const hasCalling = windowTitle.includes('calling');
-      const hasCallKeyword = hasVideoCall || hasVoiceCall || hasAudioCall || hasCalling;
-      
-      const whatsappIndex = windowTitle.indexOf('whatsapp');
-      const callKeywordIndex = hasVideoCall ? windowTitle.indexOf('video call') :
-                               hasVoiceCall ? windowTitle.indexOf('voice call') :
-                               hasAudioCall ? windowTitle.indexOf('audio call') :
-                               hasCalling ? windowTitle.indexOf('calling') : -1;
-      
-      const inCall = hasDash && hasCallKeyword && callKeywordIndex > whatsappIndex;
-      
-      console.log('Call detection - Has dash:', hasDash, 'Has keyword:', hasCallKeyword, 'In call:', inCall);
-      
-      return {
-        found: true,
-        inCall: inCall,
-        windowName: whatsappWindow.name
+    if (whatsappWindows.length === 0) {
+      return { 
+        found: false, 
+        inCall: false, 
+        windowName: null,
+        confidence: 0,
+        reason: 'No WhatsApp window'
       };
     }
     
-    console.log('WhatsApp window not found');
-    return { found: false, inCall: false, windowName: null };
+    for (const window of whatsappWindows) {
+      const windowTitle = window.name.toLowerCase();
+      
+      const callPatterns = [
+        'video call',
+        'voice call', 
+        'audio call',
+        'calling',
+        'ringing',
+        'call with',
+        'video chat',
+        'ongoing call'
+      ];
+      
+      const hasCallKeyword = callPatterns.some(pattern => windowTitle.includes(pattern));
+      
+      if (hasCallKeyword) {
+        const isFalsePositive = 
+          windowTitle.includes('no active call') ||
+          windowTitle.includes('end call') ||
+          windowTitle.includes('call ended');
+        
+        if (!isFalsePositive) {
+          return {
+            found: true,
+            inCall: true,
+            windowName: window.name,
+            confidence: 4,
+            reason: 'Active call detected'
+          };
+        }
+      }
+      
+      if (windowTitle !== 'whatsapp' && 
+          windowTitle.includes('whatsapp') && 
+          windowTitle.includes(' - ')) {
+        const afterDash = windowTitle.split(' - ')[1] || '';
+        if (afterDash.length > 3 && !afterDash.includes('whatsapp')) {
+          return {
+            found: true,
+            inCall: true,
+            windowName: window.name,
+            confidence: 3,
+            reason: 'Potential call window detected'
+          };
+        }
+      }
+    }
+    
+    return {
+      found: true,
+      inCall: false,
+      windowName: whatsappWindows[0].name,
+      confidence: 4,
+      reason: 'WhatsApp open but no active call'
+    };
     
   } catch (error) {
-    console.error('Error detecting WhatsApp:', error);
-    return { found: false, inCall: false, windowName: null };
+    console.error('❌ Error detecting WhatsApp:', error);
+    return { 
+      found: false, 
+      inCall: false, 
+      windowName: null,
+      confidence: 0,
+      reason: 'Detection error: ' + error.message
+    };
+  }
+}
+
+function updateCallStateHistory(inCall) {
+  callStateHistory.push(inCall);
+  
+  if (callStateHistory.length > 5) {
+    callStateHistory.shift();
+  }
+  
+  if (inCall) {
+    consecutiveCallDetections++;
+    consecutiveNoCallDetections = 0;
+  } else {
+    consecutiveNoCallDetections++;
+    consecutiveCallDetections = 0;
+  }
+}
+
+function getStableCallState() {
+  if (previousCallState === false && consecutiveCallDetections >= DETECTION_THRESHOLD) {
+    return true;
+  }
+  
+  if (previousCallState === true && consecutiveNoCallDetections >= DETECTION_THRESHOLD) {
+    return false;
+  }
+  
+  return previousCallState;
+}
+
+async function checkMacOSScreenRecordingPermission() {
+  if (process.platform !== 'darwin') {
+    return { granted: true, canPrompt: false };
+  }
+
+  try {
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: 1, height: 1 }
+    });
+    
+    return { granted: sources.length > 0, canPrompt: false };
+  } catch (error) {
+    return { granted: false, canPrompt: true };
   }
 }
 
 async function requestPermissions() {
-  console.log('Checking permissions for platform:', process.platform);
+  console.log('🔍 Checking permissions for platform:', process.platform);
   
   if (process.platform === 'darwin') {
     try {
       let micStatus = systemPreferences.getMediaAccessStatus('microphone');
-      console.log('Initial microphone status:', micStatus);
+      console.log('🎤 Microphone status:', micStatus);
       
       if (micStatus !== 'granted') {
         const granted = await systemPreferences.askForMediaAccess('microphone');
-        console.log('Microphone access requested, granted:', granted);
         micStatus = systemPreferences.getMediaAccessStatus('microphone');
+        console.log('🎤 Microphone after request:', micStatus);
       }
       
       let cameraStatus = systemPreferences.getMediaAccessStatus('camera');
-      console.log('Initial camera status:', cameraStatus);
+      console.log('📷 Camera status:', cameraStatus);
       
       if (cameraStatus !== 'granted') {
         const granted = await systemPreferences.askForMediaAccess('camera');
-        console.log('Camera access requested, granted:', granted);
         cameraStatus = systemPreferences.getMediaAccessStatus('camera');
+        console.log('📷 Camera after request:', cameraStatus);
       }
       
-      const screenStatus = systemPreferences.getMediaAccessStatus('screen');
-      console.log('Screen recording status:', screenStatus);
+      const screenCheck = await checkMacOSScreenRecordingPermission();
+      const screenStatus = screenCheck.granted ? 'granted' : 'denied';
+      console.log('🖥️ Screen recording status:', screenStatus);
       
-      const result = {
+      return {
         microphone: micStatus === 'granted',
         camera: cameraStatus === 'granted',
-        screen: screenStatus === 'granted',
-        needsScreenPermission: screenStatus !== 'granted'
+        screen: screenCheck.granted,
+        needsScreenPermission: !screenCheck.granted,
+        platform: 'darwin'
       };
       
-      console.log('Permission result:', result);
-      return result;
-      
     } catch (error) {
-      console.error('Permission error:', error);
+      console.error('❌ Permission error:', error);
       return {
         microphone: false,
         camera: false,
         screen: false,
         needsScreenPermission: true,
+        platform: 'darwin',
         error: error.message
       };
     }
   } else {
-    console.log('Windows platform - assuming permissions granted');
     return {
       microphone: true,
       camera: true,
       screen: true,
-      needsScreenPermission: false
+      needsScreenPermission: false,
+      platform: 'win32'
     };
   }
+}
+
+async function openSystemPreferences(type) {
+  if (process.platform === 'darwin') {
+    let prefPane = '';
+    
+    switch(type) {
+      case 'screen':
+        prefPane = 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
+        break;
+      case 'microphone':
+        prefPane = 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone';
+        break;
+      case 'camera':
+        prefPane = 'x-apple.systempreferences:com.apple.preference.security?Privacy_Camera';
+        break;
+    }
+    
+    if (prefPane) {
+      try {
+        await shell.openExternal(prefPane);
+        
+        const result = await dialog.showMessageBox(mainWindow, {
+          type: 'info',
+          title: 'Permission Required',
+          message: `Please grant ${type} permission`,
+          detail: `1. Find "${app.name}" in the list\n2. Check the box next to it\n3. Restart the app\n\nClick OK after granting permission.`,
+          buttons: ['OK', 'Cancel']
+        });
+        
+        return result.response === 0;
+      } catch (error) {
+        console.error('Error opening preferences:', error);
+        return false;
+      }
+    }
+  } else if (process.platform === 'win32') {
+    try {
+      if (type === 'microphone') {
+        await shell.openExternal('ms-settings:privacy-microphone');
+      } else if (type === 'camera') {
+        await shell.openExternal('ms-settings:privacy-webcam');
+      }
+      
+      await dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        title: 'Permission Required',
+        message: `Please grant ${type} permission`,
+        detail: 'Enable permission for this app in Windows Settings.',
+        buttons: ['OK']
+      });
+      
+      return true;
+    } catch (error) {
+      console.error('Error opening settings:', error);
+      return false;
+    }
+  }
+  
+  return false;
 }
 
 async function getSources() {
   try {
     const sources = await desktopCapturer.getSources({
       types: ['window', 'screen'],
-      thumbnailSize: { width: 200, height: 200 }
+      thumbnailSize: { width: 200, height: 200 },
+      fetchWindowIcons: true
     });
     
     return sources.map(source => ({
@@ -175,7 +341,7 @@ function getRecordings() {
   try {
     const files = fs.readdirSync(recordingsPath);
     const recordings = files
-      .filter(file => file.endsWith('.mp4'))
+      .filter(file => file.endsWith('.mp4') || file.endsWith('.webm'))
       .map(file => {
         const filePath = path.join(recordingsPath, file);
         const stats = fs.statSync(filePath);
@@ -202,6 +368,7 @@ function deleteRecording(filename) {
     const filePath = path.join(recordingsPath, filename);
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
+      console.log('🗑️ Deleted recording:', filename);
       return true;
     }
     return false;
@@ -211,101 +378,186 @@ function deleteRecording(filename) {
   }
 }
 
-async function convertWebMToMP4(webmPath, mp4Path) {
-  return new Promise((resolve, reject) => {
-    console.log('Converting WebM to MP4...');
-    console.log('Input:', webmPath);
-    console.log('Output:', mp4Path);
-    
-    ffmpeg(webmPath)
-      .outputOptions([
-        '-c:v libx264',           // H.264 video codec (universal compatibility)
-        '-preset fast',            // Encoding speed/quality balance
-        '-crf 23',                 // Quality (lower = better, 18-28 is good range)
-        '-c:a aac',                // AAC audio codec (universal compatibility)
-        '-b:a 192k',               // Audio bitrate
-        '-movflags +faststart',    // Enable streaming/quick playback
-        '-pix_fmt yuv420p'         // Pixel format for compatibility
-      ])
-      .on('start', (commandLine) => {
-        console.log('FFmpeg command:', commandLine);
-      })
-      .on('progress', (progress) => {
-        if (progress.percent) {
-          console.log(`Conversion progress: ${Math.round(progress.percent)}%`);
-        }
-      })
-      .on('end', () => {
-        console.log('Conversion completed successfully');
-        // Delete the temporary WebM file
-        try {
-          fs.unlinkSync(webmPath);
-          console.log('Temporary WebM file deleted');
-        } catch (err) {
-          console.error('Error deleting temporary WebM:', err);
-        }
-        resolve(mp4Path);
-      })
-      .on('error', (err) => {
-        console.error('Conversion error:', err);
-        reject(err);
-      })
-      .save(mp4Path);
-  });
-}
-
 async function saveRecording(buffer, filename) {
+  if (!recordingsPath) {
+    throw new Error('Recordings directory not initialized');
+  }
+
+  if (!fs.existsSync(recordingsPath)) {
+    console.log('📁 Creating recordings directory...');
+    fs.mkdirSync(recordingsPath, { recursive: true });
+  }
+
+  const tempWebm = path.join(recordingsPath, filename);
+  const finalMp4 = tempWebm.replace('.webm', '.mp4');
+
   try {
-    // Save as temporary WebM first
-    const tempWebMPath = path.join(recordingsPath, filename.replace('.mp4', '_temp.webm'));
-    fs.writeFileSync(tempWebMPath, Buffer.from(buffer));
-    console.log('WebM saved temporarily:', tempWebMPath);
+    console.log('📝 Writing WebM file:', tempWebm);
+    console.log('📊 Buffer size:', buffer.length, 'bytes');
     
-    // Convert to MP4
-    const mp4Path = path.join(recordingsPath, filename);
-    await convertWebMToMP4(tempWebMPath, mp4Path);
+    fs.writeFileSync(tempWebm, Buffer.from(buffer));
     
-    console.log('Final MP4 saved:', mp4Path);
-    return mp4Path;
+    const webmStats = fs.statSync(tempWebm);
+    console.log('✅ WebM file written:', webmStats.size, 'bytes');
+
+    if (webmStats.size < 1000) {
+      throw new Error('WebM file too small - recording may be corrupted');
+    }
+
+    if (!ffmpegPath || !fs.existsSync(ffmpegPath)) {
+      console.warn('⚠️ FFmpeg not found at:', ffmpegPath);
+      console.warn('⚠️ Keeping WebM format');
+      return tempWebm;
+    }
+
+    console.log('✅ FFmpeg found at:', ffmpegPath);
+
+    return new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(tempWebm, (err, metadata) => {
+        if (err) {
+          console.error('⚠️ FFprobe error:', err);
+          console.log('⚠️ Keeping WebM without conversion');
+          resolve(tempWebm);
+          return;
+        }
+
+        console.log('📊 WebM Streams:');
+        const hasVideo = metadata.streams.some(s => s.codec_type === 'video');
+        const hasAudio = metadata.streams.some(s => s.codec_type === 'audio');
+        
+        console.log('  Video:', hasVideo);
+        console.log('  Audio:', hasAudio);
+        
+        metadata.streams.forEach((stream, idx) => {
+          console.log(`  Stream ${idx}:`, stream.codec_type, stream.codec_name);
+        });
+
+        if (!hasVideo) {
+          console.error('❌ No video stream found!');
+          resolve(tempWebm);
+          return;
+        }
+
+        console.log('🔄 Starting FFmpeg conversion...');
+        
+        const outputOptions = [
+          '-c:v copy',
+          '-movflags +faststart'
+        ];
+
+        if (hasAudio) {
+          outputOptions.push('-c:a aac', '-b:a 192k', '-ar 48000');
+        } else {
+          console.warn('⚠️ No audio stream - video only');
+        }
+
+        const ffmpegCommand = ffmpeg(tempWebm)
+          .outputOptions(outputOptions)
+          .on('start', cmd => {
+            console.log('▶️ FFmpeg command:', cmd);
+          })
+          .on('progress', progress => {
+            if (progress.percent) {
+              console.log(`⏳ Converting: ${Math.round(progress.percent)}%`);
+            }
+          })
+          .on('end', () => {
+            console.log('✅ FFmpeg conversion complete');
+            try {
+              if (fs.existsSync(finalMp4)) {
+                const mp4Size = fs.statSync(finalMp4).size;
+                console.log('✅ MP4 file size:', mp4Size, 'bytes');
+                
+                if (mp4Size > 1000) {
+                  if (fs.existsSync(tempWebm)) {
+                    fs.unlinkSync(tempWebm);
+                    console.log('🗑️ Deleted temp WebM');
+                  }
+                  resolve(finalMp4);
+                } else {
+                  console.error('❌ MP4 too small, keeping WebM');
+                  if (fs.existsSync(finalMp4)) fs.unlinkSync(finalMp4);
+                  resolve(tempWebm);
+                }
+              } else {
+                console.error('❌ MP4 not created, keeping WebM');
+                resolve(tempWebm);
+              }
+            } catch (err) {
+              console.error('❌ Post-conversion error:', err);
+              resolve(tempWebm);
+            }
+          })
+          .on('error', (err, stdout, stderr) => {
+            console.error('❌ FFmpeg conversion error:', err.message);
+            if (stderr) console.error('FFmpeg stderr:', stderr);
+            
+            console.log('⚠️ Keeping WebM due to conversion error');
+            if (fs.existsSync(finalMp4)) {
+              try {
+                fs.unlinkSync(finalMp4);
+              } catch (e) {}
+            }
+            resolve(tempWebm);
+          });
+
+        ffmpegCommand.save(finalMp4);
+      });
+    });
+
   } catch (error) {
-    console.error('Error saving/converting recording:', error);
-    return null;
+    console.error('❌ Error in saveRecording:', error);
+    
+    if (fs.existsSync(tempWebm)) {
+      console.log('⚠️ Returning WebM due to error');
+      return tempWebm;
+    }
+    
+    throw error;
   }
 }
 
 function startMonitoring() {
-  console.log('Starting monitoring...');
+  console.log('🚀 Starting monitoring...');
   
   if (monitoringInterval) {
     clearInterval(monitoringInterval);
   }
   
   previousCallState = false;
+  callStateHistory = [];
+  consecutiveCallDetections = 0;
+  consecutiveNoCallDetections = 0;
+  isRecording = false;
   
   monitoringInterval = setInterval(async () => {
-    const detection = await detectWhatsAppWindow();
-    
-    const callStateChanged = detection.inCall !== previousCallState;
+    const detection = await detectWhatsAppCall();
+    updateCallStateHistory(detection.inCall);
+    const stableCallState = getStableCallState();
+    const callStateChanged = stableCallState !== previousCallState;
     
     if (callStateChanged) {
-      console.log('CALL STATE CHANGED: was', previousCallState, 'now', detection.inCall);
-      previousCallState = detection.inCall;
+      console.log('🔔 CALL STATE CHANGED:', previousCallState, '→', stableCallState);
+      previousCallState = stableCallState;
     }
     
     const statusData = {
       whatsappRunning: detection.found,
-      inCall: detection.inCall,
+      inCall: stableCallState,
       isRecording: isRecording,
       windowName: detection.windowName,
-      callStateChanged: callStateChanged
+      callStateChanged: callStateChanged,
+      confidence: detection.confidence,
+      reason: detection.reason,
+      rawDetection: detection.inCall,
+      consecutiveCalls: consecutiveCallDetections,
+      consecutiveNoCalls: consecutiveNoCallDetections
     };
-    
-    console.log('Status:', statusData);
     
     mainWindow.webContents.send('monitoring-status', statusData);
   }, 1000);
   
-  console.log('Monitoring interval started');
+  console.log('✅ Monitoring started');
 }
 
 function stopMonitoring() {
@@ -313,11 +565,19 @@ function stopMonitoring() {
     clearInterval(monitoringInterval);
     monitoringInterval = null;
   }
+  
   previousCallState = false;
+  callStateHistory = [];
+  consecutiveCallDetections = 0;
+  consecutiveNoCallDetections = 0;
 }
 
 ipcMain.handle('request-permissions', async () => {
   return await requestPermissions();
+});
+
+ipcMain.handle('open-system-preferences', async (event, type) => {
+  return await openSystemPreferences(type);
 });
 
 ipcMain.handle('get-sources', async () => {
@@ -333,7 +593,18 @@ ipcMain.handle('delete-recording', (event, filename) => {
 });
 
 ipcMain.handle('save-recording', async (event, buffer, filename) => {
-  return await saveRecording(buffer, filename);
+  try {
+    console.log('📥 Received save request:', filename);
+    console.log('📊 Buffer size:', buffer.length, 'bytes');
+    
+    const result = await saveRecording(buffer, filename);
+    console.log('✅ Save complete:', result);
+    return result;
+  } catch (error) {
+    console.error('❌ Save recording error:', error);
+    console.error('Error stack:', error.stack);
+    throw error;
+  }
 });
 
 ipcMain.handle('start-monitoring', () => {
@@ -351,7 +622,7 @@ ipcMain.handle('get-recordings-path', () => {
 });
 
 ipcMain.handle('check-whatsapp-status', async () => {
-  return await detectWhatsAppWindow();
+  return await detectWhatsAppCall();
 });
 
 ipcMain.handle('open-external', async (event, filePath) => {
@@ -369,7 +640,7 @@ ipcMain.handle('show-item-in-folder', async (event, filePath) => {
     shell.showItemInFolder(filePath);
     return true;
   } catch (error) {
-    console.error('Error showing item in folder:', error);
+    console.error('Error showing folder:', error);
     return false;
   }
 });
