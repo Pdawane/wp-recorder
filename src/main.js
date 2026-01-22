@@ -17,7 +17,7 @@ let previousCallState = false;
 let callStateHistory = [];
 let consecutiveCallDetections = 0;
 let consecutiveNoCallDetections = 0;
-const DETECTION_THRESHOLD = 2;
+const DETECTION_THRESHOLD = 3; // Increased from 2 to 3 for stricter detection
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -32,11 +32,13 @@ function createWindow() {
       enableRemoteModule: false,
       webSecurity: true
     },
-    icon: path.join(__dirname, '../assets/icon.png')
+    icon: path.join(__dirname, '../assets/icon.png'),
+    resizable: true,
+    maximizable: true,
+    minimizable: true
   });
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
-  mainWindow.webContents.openDevTools();
   
   mainWindow.webContents.session.setPermissionRequestHandler((webContents, permission, callback) => {
     if (permission === 'media' || permission === 'audioCapture' || permission === 'displayCapture') {
@@ -45,6 +47,8 @@ function createWindow() {
       callback(false);
     }
   });
+  
+  mainWindow.setMenu(null);
   
   console.log('Window created successfully');
 }
@@ -88,57 +92,52 @@ async function detectWhatsAppCall() {
     for (const window of whatsappWindows) {
       const windowTitle = window.name.toLowerCase();
       
-      const callPatterns = [
+      // STRICT call patterns - must explicitly indicate active call
+      const strongCallPatterns = [
         'video call',
         'voice call', 
         'audio call',
         'calling',
-        'ringing',
-        'call with',
-        'video chat',
-        'ongoing call'
+        'ongoing call',
+        'in call'
       ];
       
-      const hasCallKeyword = callPatterns.some(pattern => windowTitle.includes(pattern));
+      // Check for strong call indicators
+      const hasStrongCallKeyword = strongCallPatterns.some(pattern => windowTitle.includes(pattern));
       
-      if (hasCallKeyword) {
+      if (hasStrongCallKeyword) {
+        // Check for false positive indicators
         const isFalsePositive = 
           windowTitle.includes('no active call') ||
           windowTitle.includes('end call') ||
-          windowTitle.includes('call ended');
+          windowTitle.includes('call ended') ||
+          windowTitle.includes('missed call') ||
+          windowTitle.includes('call history') ||
+          windowTitle === 'whatsapp' ||
+          windowTitle === 'whatsapp web';
         
         if (!isFalsePositive) {
+          console.log('✅ STRONG CALL DETECTED:', window.name);
           return {
             found: true,
             inCall: true,
             windowName: window.name,
-            confidence: 4,
-            reason: 'Active call detected'
+            confidence: 5,
+            reason: 'Strong call pattern detected'
           };
         }
       }
       
-      if (windowTitle !== 'whatsapp' && 
-          windowTitle.includes('whatsapp') && 
-          windowTitle.includes(' - ')) {
-        const afterDash = windowTitle.split(' - ')[1] || '';
-        if (afterDash.length > 3 && !afterDash.includes('whatsapp')) {
-          return {
-            found: true,
-            inCall: true,
-            windowName: window.name,
-            confidence: 3,
-            reason: 'Potential call window detected'
-          };
-        }
-      }
+      // REMOVED the weak detection logic that was causing false positives
+      // Only detect calls if there's a strong pattern match
     }
     
+    // WhatsApp is open but no active call detected
     return {
       found: true,
       inCall: false,
       windowName: whatsappWindows[0].name,
-      confidence: 4,
+      confidence: 5,
       reason: 'WhatsApp open but no active call'
     };
     
@@ -171,11 +170,15 @@ function updateCallStateHistory(inCall) {
 }
 
 function getStableCallState() {
+  // Require MORE consecutive detections to start (3 instead of 2)
   if (previousCallState === false && consecutiveCallDetections >= DETECTION_THRESHOLD) {
+    console.log('📞 CALL STATE CHANGE: false → true (after', consecutiveCallDetections, 'detections)');
     return true;
   }
   
-  if (previousCallState === true && consecutiveNoCallDetections >= DETECTION_THRESHOLD) {
+  // Require FEWER consecutive detections to stop (2 instead of 3) - faster stop
+  if (previousCallState === true && consecutiveNoCallDetections >= 2) {
+    console.log('📴 CALL STATE CHANGE: true → false (after', consecutiveNoCallDetections, 'no-call detections)');
     return false;
   }
   
@@ -405,112 +408,103 @@ async function saveRecording(buffer, filename) {
     }
 
     if (!ffmpegPath || !fs.existsSync(ffmpegPath)) {
-      console.warn('⚠️ FFmpeg not found at:', ffmpegPath);
-      console.warn('⚠️ Keeping WebM format');
-      return tempWebm;
+      console.error('❌ FFmpeg not found at:', ffmpegPath);
+      if (fs.existsSync(tempWebm)) {
+        fs.unlinkSync(tempWebm);
+      }
+      throw new Error('FFmpeg not available - MP4 conversion required');
     }
 
     console.log('✅ FFmpeg found at:', ffmpegPath);
+    console.log('🔄 Starting MP4 conversion...');
 
     return new Promise((resolve, reject) => {
-      ffmpeg.ffprobe(tempWebm, (err, metadata) => {
-        if (err) {
-          console.error('⚠️ FFprobe error:', err);
-          console.log('⚠️ Keeping WebM without conversion');
-          resolve(tempWebm);
-          return;
-        }
-
-        console.log('📊 WebM Streams:');
-        const hasVideo = metadata.streams.some(s => s.codec_type === 'video');
-        const hasAudio = metadata.streams.some(s => s.codec_type === 'audio');
-        
-        console.log('  Video:', hasVideo);
-        console.log('  Audio:', hasAudio);
-        
-        metadata.streams.forEach((stream, idx) => {
-          console.log(`  Stream ${idx}:`, stream.codec_type, stream.codec_name);
+      const ffmpegCommand = ffmpeg(tempWebm)
+        .outputOptions([
+          '-c:v libx264',
+          '-preset fast',
+          '-crf 23',
+          '-c:a aac',
+          '-b:a 192k',
+          '-ar 48000',
+          '-movflags +faststart'
+        ])
+        .on('start', cmd => {
+          console.log('▶️ FFmpeg command:', cmd);
+        })
+        .on('progress', progress => {
+          if (progress.percent) {
+            const percent = Math.round(progress.percent);
+            console.log(`⏳ Converting to MP4: ${percent}%`);
+          }
+        })
+        .on('end', () => {
+          console.log('✅ FFmpeg conversion COMPLETE');
+          
+          try {
+            if (fs.existsSync(finalMp4)) {
+              const mp4Size = fs.statSync(finalMp4).size;
+              const mp4SizeMB = (mp4Size / 1024 / 1024).toFixed(2);
+              console.log('✅ MP4 created successfully!');
+              console.log('  File:', finalMp4);
+              console.log('  Size:', mp4SizeMB, 'MB');
+              
+              if (mp4Size > 1000) {
+                if (fs.existsSync(tempWebm)) {
+                  fs.unlinkSync(tempWebm);
+                  console.log('🗑️ Deleted temp WebM file');
+                }
+                console.log('✅ MP4 saved successfully');
+                resolve(finalMp4);
+              } else {
+                console.error('❌ MP4 file too small');
+                if (fs.existsSync(finalMp4)) fs.unlinkSync(finalMp4);
+                if (fs.existsSync(tempWebm)) fs.unlinkSync(tempWebm);
+                reject(new Error('MP4 file too small after conversion'));
+              }
+            } else {
+              console.error('❌ MP4 file not created!');
+              if (fs.existsSync(tempWebm)) fs.unlinkSync(tempWebm);
+              reject(new Error('MP4 file was not created by FFmpeg'));
+            }
+          } catch (err) {
+            console.error('❌ Post-conversion error:', err);
+            if (fs.existsSync(tempWebm)) {
+              try { fs.unlinkSync(tempWebm); } catch (e) {}
+            }
+            if (fs.existsSync(finalMp4)) {
+              try { fs.unlinkSync(finalMp4); } catch (e) {}
+            }
+            reject(err);
+          }
+        })
+        .on('error', (err, stdout, stderr) => {
+          console.error('❌ FFmpeg conversion FAILED');
+          console.error('Error:', err.message);
+          
+          if (fs.existsSync(tempWebm)) {
+            try { fs.unlinkSync(tempWebm); } catch (e) {}
+          }
+          if (fs.existsSync(finalMp4)) {
+            try { fs.unlinkSync(finalMp4); } catch (e) {}
+          }
+          
+          reject(new Error('FFmpeg conversion failed: ' + err.message));
         });
 
-        if (!hasVideo) {
-          console.error('❌ No video stream found!');
-          resolve(tempWebm);
-          return;
-        }
-
-        console.log('🔄 Starting FFmpeg conversion...');
-        
-        const outputOptions = [
-          '-c:v copy',
-          '-movflags +faststart'
-        ];
-
-        if (hasAudio) {
-          outputOptions.push('-c:a aac', '-b:a 192k', '-ar 48000');
-        } else {
-          console.warn('⚠️ No audio stream - video only');
-        }
-
-        const ffmpegCommand = ffmpeg(tempWebm)
-          .outputOptions(outputOptions)
-          .on('start', cmd => {
-            console.log('▶️ FFmpeg command:', cmd);
-          })
-          .on('progress', progress => {
-            if (progress.percent) {
-              console.log(`⏳ Converting: ${Math.round(progress.percent)}%`);
-            }
-          })
-          .on('end', () => {
-            console.log('✅ FFmpeg conversion complete');
-            try {
-              if (fs.existsSync(finalMp4)) {
-                const mp4Size = fs.statSync(finalMp4).size;
-                console.log('✅ MP4 file size:', mp4Size, 'bytes');
-                
-                if (mp4Size > 1000) {
-                  if (fs.existsSync(tempWebm)) {
-                    fs.unlinkSync(tempWebm);
-                    console.log('🗑️ Deleted temp WebM');
-                  }
-                  resolve(finalMp4);
-                } else {
-                  console.error('❌ MP4 too small, keeping WebM');
-                  if (fs.existsSync(finalMp4)) fs.unlinkSync(finalMp4);
-                  resolve(tempWebm);
-                }
-              } else {
-                console.error('❌ MP4 not created, keeping WebM');
-                resolve(tempWebm);
-              }
-            } catch (err) {
-              console.error('❌ Post-conversion error:', err);
-              resolve(tempWebm);
-            }
-          })
-          .on('error', (err, stdout, stderr) => {
-            console.error('❌ FFmpeg conversion error:', err.message);
-            if (stderr) console.error('FFmpeg stderr:', stderr);
-            
-            console.log('⚠️ Keeping WebM due to conversion error');
-            if (fs.existsSync(finalMp4)) {
-              try {
-                fs.unlinkSync(finalMp4);
-              } catch (e) {}
-            }
-            resolve(tempWebm);
-          });
-
-        ffmpegCommand.save(finalMp4);
-      });
+      ffmpegCommand.save(finalMp4);
     });
 
   } catch (error) {
     console.error('❌ Error in saveRecording:', error);
     
     if (fs.existsSync(tempWebm)) {
-      console.log('⚠️ Returning WebM due to error');
-      return tempWebm;
+      try {
+        fs.unlinkSync(tempWebm);
+        console.log('🗑️ Cleaned up temp WebM file');
+      } catch (e) {
+        console.error('Error cleaning temp file:', e);
+      }
     }
     
     throw error;
@@ -602,7 +596,6 @@ ipcMain.handle('save-recording', async (event, buffer, filename) => {
     return result;
   } catch (error) {
     console.error('❌ Save recording error:', error);
-    console.error('Error stack:', error.stack);
     throw error;
   }
 });

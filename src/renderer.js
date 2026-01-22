@@ -12,8 +12,9 @@ let autoRecordingEnabled = true;
 let recordingLock = false;
 let audioContext = null;
 let audioDestination = null;
+let callEndGracePeriod = null;
+let pendingSave = false;
 
-const themeToggle = document.getElementById('themeToggle');
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const checkPermissionsBtn = document.getElementById('checkPermissionsBtn');
@@ -29,7 +30,6 @@ const recordingsList = document.getElementById('recordingsList');
 const noRecordings = document.getElementById('noRecordings');
 
 document.addEventListener('DOMContentLoaded', () => {
-  loadTheme();
   loadRecordings();
   setupEventListeners();
   console.log('🚀 App initialized');
@@ -37,26 +37,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setTimeout(() => checkPermissions(), 1000);
 });
 
-function loadTheme() {
-  const savedTheme = window.localStorage?.getItem('theme') || 'light';
-  setTheme(savedTheme);
-}
-
-function setTheme(theme) {
-  currentTheme = theme;
-  document.documentElement.setAttribute('data-theme', theme);
-  themeToggle.querySelector('.theme-icon').textContent = theme === 'light' ? '🌙' : '☀️';
-  try {
-    window.localStorage?.setItem('theme', theme);
-  } catch (e) {}
-}
-
-function toggleTheme() {
-  setTheme(currentTheme === 'light' ? 'dark' : 'light');
-}
-
 function setupEventListeners() {
-  themeToggle.addEventListener('click', toggleTheme);
   startBtn.addEventListener('click', startMonitoring);
   stopBtn.addEventListener('click', stopMonitoring);
   checkPermissionsBtn.addEventListener('click', checkPermissions);
@@ -67,89 +48,141 @@ function setupEventListeners() {
   });
 }
 
+function showNotification(message, type = 'info') {
+  const notification = document.createElement('div');
+  notification.className = `notification notification-${type}`;
+  notification.textContent = message;
+  
+  Object.assign(notification.style, {
+    position: 'fixed',
+    top: '20px',
+    right: '20px',
+    padding: '12px 20px',
+    backgroundColor: type === 'success' ? '#4ade80' : 
+                     type === 'error' ? '#f87171' : 
+                     '#fbbf24',
+    color: '#000000',
+    borderRadius: '8px',
+    boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+    zIndex: '10000',
+    maxWidth: '400px',
+    fontSize: '0.9rem',
+    fontWeight: '600',
+    animation: 'slideIn 0.3s ease-out',
+    cursor: 'pointer'
+  });
+  
+  document.body.appendChild(notification);
+  
+  notification.addEventListener('click', () => {
+    notification.style.animation = 'slideOut 0.3s ease-out';
+    setTimeout(() => notification.remove(), 300);
+  });
+  
+  setTimeout(() => {
+    if (notification.parentNode) {
+      notification.style.animation = 'slideOut 0.3s ease-out';
+      setTimeout(() => notification.remove(), 300);
+    }
+  }, 5000);
+}
+
+function showPersistentNotification(message, type = 'info') {
+  const notification = document.createElement('div');
+  notification.className = `notification notification-${type} notification-persistent`;
+  
+  const messageSpan = document.createElement('span');
+  messageSpan.textContent = message;
+  
+  const spinner = document.createElement('div');
+  spinner.style.cssText = `
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    margin-left: 10px;
+    border: 2px solid rgba(0,0,0,0.1);
+    border-top: 2px solid #000;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  `;
+  
+  notification.appendChild(messageSpan);
+  notification.appendChild(spinner);
+  
+  Object.assign(notification.style, {
+    position: 'fixed',
+    top: '20px',
+    right: '20px',
+    padding: '16px 24px',
+    backgroundColor: type === 'success' ? '#4ade80' : 
+                     type === 'error' ? '#f87171' : 
+                     '#fbbf24',
+    color: '#000000',
+    borderRadius: '8px',
+    boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+    zIndex: '10001',
+    maxWidth: '500px',
+    fontSize: '0.95rem',
+    fontWeight: '700',
+    animation: 'slideIn 0.3s ease-out',
+    border: '3px solid rgba(0,0,0,0.2)'
+  });
+  
+  // Add spinning animation
+  const style = document.createElement('style');
+  style.textContent = `
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+  `;
+  document.head.appendChild(style);
+  
+  document.body.appendChild(notification);
+  
+  return notification;
+}
+
 async function checkPermissions() {
   try {
     console.log('🔍 Checking permissions...');
-    permissionsStatus.innerHTML = '<div style="text-align: center;">Checking permissions...</div>';
+    permissionsStatus.innerHTML = '<div style="text-align: center; font-size: 0.75rem; color: var(--text-secondary);">Checking...</div>';
     
     const permissions = await window.electronAPI.requestPermissions();
     
     if (permissions.error) {
-      permissionsStatus.innerHTML = `<div style="color: var(--accent-danger);">Error: ${permissions.error}</div>`;
+      permissionsStatus.innerHTML = `<div style="color: var(--accent-red); font-size: 0.75rem;">Error: ${permissions.error}</div>`;
       return;
     }
     
-    let html = '<div style="margin-bottom: 1rem;">';
+    let html = '<div class="permissions-compact">';
     
-    html += '<div class="permission-item">';
-    html += '<span>🎤 Microphone:</span>';
-    html += `<span class="${permissions.microphone ? 'permission-granted' : 'permission-denied'}">`;
-    html += permissions.microphone ? '✓ Granted' : '✗ Denied';
-    html += '</span>';
-    if (!permissions.microphone) {
-      html += '<button onclick="openPermissionSettings(\'microphone\')" style="margin-left: 10px; padding: 4px 8px; font-size: 0.75rem;">Grant Access</button>';
+    html += `🎤 <span class="${permissions.microphone ? 'permission-granted' : 'permission-denied'}">${permissions.microphone ? '✓' : '✗'}</span>`;
+    html += '<span class="permissions-divider">|</span>';
+    html += `📷 <span class="${permissions.camera ? 'permission-granted' : 'permission-denied'}">${permissions.camera ? '✓' : '✗'}</span>`;
+    html += '<span class="permissions-divider">|</span>';
+    html += `🖥️ <span class="${permissions.screen ? 'permission-granted' : 'permission-denied'}">${permissions.screen ? '✓' : '✗'}</span>`;
+    
+    if (permissions.microphone && permissions.camera && permissions.screen) {
+      html += '<span class="permissions-divider">|</span>';
+      html += '<span class="permissions-all-granted">All granted</span>';
     }
+    
     html += '</div>';
     
-    html += '<div class="permission-item">';
-    html += '<span>📷 Camera:</span>';
-    html += `<span class="${permissions.camera ? 'permission-granted' : 'permission-denied'}">`;
-    html += permissions.camera ? '✓ Granted' : '✗ Denied';
-    html += '</span>';
-    if (!permissions.camera) {
-      html += '<button onclick="openPermissionSettings(\'camera\')" style="margin-left: 10px; padding: 4px 8px; font-size: 0.75rem;">Grant Access</button>';
+    if (permissions.platform === 'win32' && permissions.microphone && permissions.camera && permissions.screen) {
+      html += '<div class="windows-instructions">';
+      html += '<strong>Windows:</strong> Select "Entire Screen" or WhatsApp window • Check "Share system audio"';
+      html += '</div>';
     }
-    html += '</div>';
-    
-    html += '<div class="permission-item">';
-    html += '<span>🖥️ Screen Recording:</span>';
-    html += `<span class="${permissions.screen ? 'permission-granted' : 'permission-denied'}">`;
-    html += permissions.screen ? '✓ Granted' : '✗ Denied';
-    html += '</span>';
-    if (!permissions.screen && permissions.platform === 'darwin') {
-      html += '<button onclick="openPermissionSettings(\'screen\')" style="margin-left: 10px; padding: 4px 8px; font-size: 0.75rem;">Grant Access</button>';
-    }
-    html += '</div>';
-    
-    html += '</div>';
     
     if (permissions.platform === 'darwin' && permissions.needsScreenPermission) {
-      html += '<div style="margin-top: 1rem; padding: 1rem; background: var(--accent-danger); color: white; border-radius: 8px; font-size: 0.875rem;">';
-      html += '<strong>⚠️ macOS Screen Recording Permission Required</strong><br><br>';
-      html += '1. Click "Grant Access" button above<br>';
-      html += '2. Find this app in the list<br>';
-      html += '3. Check the box next to it<br>';
-      html += '4. <strong>RESTART the app</strong><br><br>';
-      html += '<strong>⚠️ Without this permission, recording will fail!</strong>';
+      html += '<div class="windows-instructions" style="border-left-color: var(--accent-red); color: var(--accent-red); font-weight: 600;">';
+      html += '⚠️ macOS: Grant Screen Recording permission in System Settings • Restart app';
       html += '</div>';
     } else if (!permissions.microphone || !permissions.camera) {
-      html += '<div style="margin-top: 1rem; padding: 1rem; background: var(--accent-warning); color: #000; border-radius: 8px; font-size: 0.875rem;">';
-      html += '<strong>⚠️ Missing Permissions</strong><br><br>';
-      html += 'Click "Grant Access" buttons above to enable all permissions.<br>';
-      html += 'You may need to restart the app after granting permissions.';
-      html += '</div>';
-    } else if (permissions.microphone && permissions.camera && permissions.screen) {
-      html += '<div style="margin-top: 1rem; padding: 1.5rem; background: linear-gradient(135deg, var(--accent-primary), #667eea); color: white; border-radius: 12px; font-size: 0.9rem; line-height: 1.6;">';
-      html += '<strong style="font-size: 1.1rem;">✅ All Permissions Granted!</strong><br><br>';
-      
-      if (permissions.platform === 'darwin') {
-        html += '<div style="background: rgba(255,255,255,0.15); padding: 12px; border-radius: 8px; margin-top: 10px;">';
-        html += '<strong>📱 macOS Users - CRITICAL STEP:</strong><br><br>';
-        html += '<span style="font-size: 1.05rem;">When you start recording:</span><br>';
-        html += '1️⃣ Choose the <strong>WhatsApp call window</strong><br>';
-        html += '2️⃣ ⚠️ <strong style="background: #fbbf24; color: #000; padding: 2px 6px; border-radius: 4px;">CHECK "Share system audio"</strong> ⚠️<br>';
-        html += '3️⃣ Click "Share"<br><br>';
-        html += '<span style="color: #fef3c7;">Without "Share system audio", participants won\'t be recorded!</span>';
-        html += '</div>';
-      } else {
-        html += '<div style="background: rgba(255,255,255,0.15); padding: 12px; border-radius: 8px; margin-top: 10px;">';
-        html += '<strong>💻 Windows Users:</strong><br><br>';
-        html += 'When recording starts, select <strong>"Entire Screen"</strong> or the <strong>WhatsApp window</strong><br>';
-        html += 'Check <strong>"Share system audio"</strong> to capture participants\' voices!<br><br>';
-        html += 'Your microphone will automatically capture your voice.';
-        html += '</div>';
-      }
-      
+      html += '<div class="windows-instructions" style="border-left-color: var(--accent-red);">';
+      html += '⚠️ Missing permissions • Click buttons above to grant';
       html += '</div>';
     }
     
@@ -157,18 +190,17 @@ async function checkPermissions() {
     
   } catch (error) {
     console.error('❌ Error checking permissions:', error);
-    permissionsStatus.innerHTML = `<div style="color: var(--accent-danger);">Error: ${error.message}</div>`;
+    permissionsStatus.innerHTML = `<div style="color: var(--accent-red); font-size: 0.75rem;">Error: ${error.message}</div>`;
   }
 }
 
 async function openPermissionSettings(type) {
   try {
     await window.electronAPI.openSystemPreferences(type);
-    
     setTimeout(() => checkPermissions(), 2000);
   } catch (error) {
     console.error('Error opening settings:', error);
-    alert('Failed to open system settings: ' + error.message);
+    showNotification('❌ No screen sources available! Check permissions.', 'error');
   }
 }
 
@@ -198,6 +230,7 @@ async function startMonitoring() {
     isCurrentlyRecording = false;
     recordingStartScheduled = false;
     recordingLock = false;
+    pendingSave = false;
     
     startBtn.disabled = true;
     stopBtn.disabled = false;
@@ -216,8 +249,32 @@ async function stopMonitoring() {
   try {
     console.log('🛑 Stopping monitoring...');
     
-    if (isCurrentlyRecording) {
-      await forceStopRecording();
+    // Cancel any grace period
+    if (callEndGracePeriod) {
+      clearTimeout(callEndGracePeriod);
+      callEndGracePeriod = null;
+    }
+    
+    // If recording, stop and wait for save
+    if (isCurrentlyRecording && mediaRecorder && mediaRecorder.state === 'recording') {
+      console.log('⏹️ Stopping active recording...');
+      pendingSave = true;
+      mediaRecorder.stop();
+      
+      // Wait for save to complete
+      await new Promise(resolve => {
+        const checkInterval = setInterval(() => {
+          if (!pendingSave && !isCurrentlyRecording) {
+            clearInterval(checkInterval);
+            resolve();
+          }
+        }, 100);
+        
+        setTimeout(() => {
+          clearInterval(checkInterval);
+          resolve();
+        }, 15000);
+      });
     }
     
     await window.electronAPI.stopMonitoring();
@@ -227,6 +284,7 @@ async function stopMonitoring() {
     isCurrentlyRecording = false;
     recordingStartScheduled = false;
     recordingLock = false;
+    pendingSave = false;
     
     startBtn.disabled = false;
     stopBtn.disabled = true;
@@ -243,12 +301,38 @@ async function stopMonitoring() {
 }
 
 function updateMonitoringStatus(data) {
-  whatsappStatus.textContent = data.whatsappRunning ? 'Running ✓' : 'Not Running ✗';
-  whatsappStatus.style.color = data.whatsappRunning ? 'var(--accent-primary)' : 'var(--accent-danger)';
-  
-  if (data.windowName) {
-    whatsappStatus.textContent = `Running ✓ (${data.windowName})`;
+  // Extract participant name from window title ONLY during active call
+  let participantName = '';
+  if (data.inCall && data.windowName) {
+    const windowTitle = data.windowName;
+    
+    // Try to extract name from common patterns
+    if (windowTitle.includes('WhatsApp') && windowTitle.includes('-')) {
+      const parts = windowTitle.split('-');
+      if (parts.length > 1) {
+        let name = parts[1].trim();
+        // Remove common suffixes
+        name = name.replace(/\s*(Video|Voice|Audio)?\s*Call.*$/i, '').trim();
+        if (name && name.toLowerCase() !== 'whatsapp') {
+          participantName = ` (${name})`;
+        }
+      }
+    } else if (windowTitle.toLowerCase().includes('call with')) {
+      let name = windowTitle.replace(/.*call with\s*/i, '').trim();
+      if (name) {
+        participantName = ` (${name})`;
+      }
+    } else if (windowTitle.toLowerCase().includes('video call') || windowTitle.toLowerCase().includes('voice call')) {
+      // Extract name before "Video Call" or "Voice Call"
+      let name = windowTitle.replace(/\s*-?\s*(Video|Voice|Audio)\s*Call.*/i, '').replace('WhatsApp', '').trim();
+      if (name && name !== '') {
+        participantName = ` (${name})`;
+      }
+    }
   }
+  
+  whatsappStatus.textContent = data.whatsappRunning ? `Running ✓${participantName}` : 'Not Running ✗';
+  whatsappStatus.style.color = data.whatsappRunning ? 'var(--accent-primary)' : 'var(--accent-danger)';
   
   const confidenceEmoji = data.confidence >= 3 ? '🟢' : data.confidence >= 2 ? '🟡' : '🔴';
   callStatus.textContent = data.inCall ? 
@@ -261,37 +345,58 @@ function updateMonitoringStatus(data) {
   
   if (!isMonitoring) return;
   
-  if (data.inCall && !wasInCall && !isCurrentlyRecording && !recordingStartScheduled && !recordingLock && autoRecordingEnabled) {
+  // CRITICAL FIX: Handle call end - stop immediately, no grace period
+  if (!data.inCall && wasInCall && isCurrentlyRecording) {
+    console.log('📴 CALL ENDED - Stopping recording immediately');
+    wasInCall = false;
+    recordingStartScheduled = false;
+    
+    // Clear any grace period if exists
+    if (callEndGracePeriod) {
+      clearTimeout(callEndGracePeriod);
+      callEndGracePeriod = null;
+    }
+    
+    // Stop recording now
+    stopRecording();
+    return;
+  }
+  
+  // Reset wasInCall if call ended but we weren't recording
+  if (!data.inCall && wasInCall && !isCurrentlyRecording) {
+    console.log('📴 CALL ENDED (not recording)');
+    wasInCall = false;
+    recordingStartScheduled = false;
+    if (callEndGracePeriod) {
+      clearTimeout(callEndGracePeriod);
+      callEndGracePeriod = null;
+    }
+  }
+  
+  // Auto-start recording when call is detected
+  if (data.inCall && !wasInCall && !isCurrentlyRecording && !recordingStartScheduled && !recordingLock && autoRecordingEnabled && !pendingSave) {
     console.log('📞 CALL DETECTED - Scheduling recording');
     wasInCall = true;
     recordingStartScheduled = true;
     recordingControls.style.display = 'block';
     
     setTimeout(() => {
-      if (wasInCall && !isCurrentlyRecording && !recordingLock) {
+      if (wasInCall && !isCurrentlyRecording && !recordingLock && !pendingSave) {
         console.log('▶️ Auto-starting recording');
         recordingStartScheduled = false;
         startRecording();
       } else {
         recordingStartScheduled = false;
       }
-    }, 3000);
+    }, 2000);
   }
   
-  if (!data.inCall && wasInCall) {
-    console.log('📴 CALL ENDED');
-    wasInCall = false;
-    recordingStartScheduled = false;
-    
-    if (isCurrentlyRecording) {
-      stopRecording();
-    }
-  }
-  
+  // Update wasInCall state for ongoing calls
   if (data.inCall) {
     wasInCall = true;
   }
   
+  // Show/hide recording controls
   if (data.inCall || isCurrentlyRecording) {
     recordingControls.style.display = 'block';
   } else {
@@ -300,8 +405,8 @@ function updateMonitoringStatus(data) {
 }
 
 async function startRecording() {
-  if (recordingLock || isCurrentlyRecording) {
-    console.log('⚠️ Recording already in progress');
+  if (recordingLock || isCurrentlyRecording || pendingSave) {
+    console.log('⚠️ Recording already in progress or pending save');
     return;
   }
   
@@ -362,7 +467,7 @@ async function startRecording() {
     });
 
     if (!selectedSource) {
-      alert('❌ WhatsApp call window not found!\n\nMake sure you have an active call.\n\nYou can also select "Entire Screen" when prompted.');
+      showNotification('❌ WhatsApp call window not found! Make sure you have an active call.', 'error');
       if (micStream) micStream.getTracks().forEach(t => t.stop());
       recordingLock = false;
       return;
@@ -371,9 +476,6 @@ async function startRecording() {
     console.log('✅ Found window:', selectedSource.name);
     
     console.log('🖥️ Step 3: Capturing screen WITH system audio...');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('⚠️  IMPORTANT: CHECK "Share system audio"!');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     
     let videoStream;
     try {
@@ -408,7 +510,7 @@ async function startRecording() {
       
     } catch (error) {
       console.error('❌ Screen capture failed:', error);
-      alert('❌ Failed to capture screen:\n\n' + error.message);
+      showNotification('❌ Failed to capture screen: ' + error.message, 'error');
       if (micStream) micStream.getTracks().forEach(t => t.stop());
       recordingLock = false;
       return;
@@ -422,38 +524,25 @@ async function startRecording() {
     console.log('  System audio tracks:', systemAudioTracks.length);
     
     if (videoTracks.length === 0) {
-      alert('❌ No video track captured!');
+      showNotification('❌ No video track captured!', 'error');
       videoStream.getTracks().forEach(t => t.stop());
       if (micStream) micStream.getTracks().forEach(t => t.stop());
       recordingLock = false;
       return;
     }
     
-    videoTracks.forEach((track, i) => {
-      console.log(`  📹 Video ${i}:`, {
-        label: track.label,
-        enabled: track.enabled,
-        readyState: track.readyState,
-        settings: track.getSettings()
-      });
-    });
-    
     if (systemAudioTracks.length === 0) {
-      console.error('❌❌❌ NO SYSTEM AUDIO DETECTED! ❌❌❌');
-      console.error('Participants will NOT be recorded!');
+      console.error('❌ NO SYSTEM AUDIO DETECTED!');
       
       const continueWithout = confirm(
         '❌ CRITICAL: System audio NOT captured!\n\n' +
         'Participants\' voices will NOT be recorded!\n\n' +
-        '━━━━━━━━━━━━━━━━━━━━━━━━\n' +
         'To fix:\n' +
         '1. Click Cancel\n' +
         '2. Start recording again\n' +
         '3. CHECK "Share system audio" box\n' +
         '4. Select "Entire Screen" or WhatsApp window\n' +
-        '5. Click Share\n' +
-        '━━━━━━━━━━━━━━━━━━━━━━━━\n\n' +
-        'Continue WITHOUT participants\' audio?'
+        '\n\nContinue WITHOUT participants\' audio?'
       );
       
       if (!continueWithout) {
@@ -462,18 +551,6 @@ async function startRecording() {
         recordingLock = false;
         return;
       }
-      console.log('⚠️ User chose to continue without system audio');
-    } else {
-      console.log('✅ System audio DETECTED!');
-      systemAudioTracks.forEach((track, i) => {
-        console.log(`  🔊 System Audio ${i}:`, {
-          label: track.label,
-          enabled: track.enabled,
-          readyState: track.readyState,
-          muted: track.muted,
-          settings: track.getSettings()
-        });
-      });
     }
     
     console.log('🎚️ Step 4: Mixing audio streams...');
@@ -492,7 +569,7 @@ async function startRecording() {
         systemSource.connect(systemGain);
         systemGain.connect(audioDestination);
         
-        console.log('✅ System audio connected (Gain: 2.0x)');
+        console.log('✅ System audio connected');
         audioSourcesConnected++;
       } catch (err) {
         console.error('❌ Failed to connect system audio:', err);
@@ -508,51 +585,24 @@ async function startRecording() {
         micSource.connect(micGain);
         micGain.connect(audioDestination);
         
-        console.log('✅ Microphone connected (Gain: 1.5x)');
+        console.log('✅ Microphone connected');
         audioSourcesConnected++;
       } catch (err) {
         console.error('❌ Failed to connect microphone:', err);
       }
     }
     
-    console.log(`📊 Total audio sources mixed: ${audioSourcesConnected}`);
-    
     if (audioSourcesConnected === 0) {
-      alert('❌ No audio sources available!\n\nCannot record without audio.');
+      showNotification('❌ No audio sources available!', 'error');
       videoStream.getTracks().forEach(t => t.stop());
       if (audioContext) audioContext.close();
       recordingLock = false;
       return;
     }
     
-    console.log('🎬 Step 5: Creating final recording stream...');
     currentStream = new MediaStream();
-    
-    videoTracks.forEach(track => {
-      currentStream.addTrack(track);
-      console.log('➕ Added video track');
-    });
-    
-    const mixedAudioTracks = audioDestination.stream.getAudioTracks();
-    mixedAudioTracks.forEach(track => {
-      currentStream.addTrack(track);
-      console.log('➕ Added mixed audio track');
-    });
-    
-    console.log('📊 Final stream composition:');
-    console.log('  Video tracks:', currentStream.getVideoTracks().length);
-    console.log('  Audio tracks:', currentStream.getAudioTracks().length);
-    
-    currentStream.getAudioTracks().forEach((track, i) => {
-      console.log(`  🎵 Final Audio ${i}:`, {
-        label: track.label,
-        enabled: track.enabled,
-        readyState: track.readyState,
-        settings: track.getSettings()
-      });
-    });
-    
-    console.log('📹 Step 6: Setting up MediaRecorder...');
+    videoTracks.forEach(track => currentStream.addTrack(track));
+    audioDestination.stream.getAudioTracks().forEach(track => currentStream.addTrack(track));
     
     const supportedTypes = [
       'video/webm;codecs=vp8,opus',
@@ -565,7 +615,6 @@ async function startRecording() {
     for (const type of supportedTypes) {
       if (MediaRecorder.isTypeSupported(type)) {
         selectedType = type;
-        console.log('✅ Using codec:', type);
         break;
       }
     }
@@ -586,34 +635,33 @@ async function startRecording() {
     mediaRecorder.ondataavailable = (event) => {
       if (event.data && event.data.size > 0) {
         recordedChunks.push(event.data);
-        console.log(`📦 Chunk ${recordedChunks.length}: ${event.data.size} bytes`);
       }
     };
     
     mediaRecorder.onstop = async () => {
-      console.log('⏹️ Recording stopped');
-      console.log('═══════════════════════════════════════');
+      console.log('⏹️ MediaRecorder stopped');
+      pendingSave = true;
       
       if (recordedChunks.length === 0) {
-        alert('❌ No data recorded!\n\nPlease try again.');
+        console.error('❌ No chunks recorded!');
+        showNotification('❌ No data recorded!', 'error');
         cleanupStream();
         isCurrentlyRecording = false;
         recordingLock = false;
+        pendingSave = false;
         return;
       }
       
       try {
         const blob = new Blob(recordedChunks, { type: 'video/webm' });
         const sizeMB = (blob.size / 1024 / 1024).toFixed(2);
-        console.log('📦 Recording details:');
-        console.log('  Total chunks:', recordedChunks.length);
-        console.log('  Total size:', sizeMB, 'MB');
         
         if (blob.size < 1000) {
-          alert('❌ Recording too small!\n\nAudio/video may not have been captured.');
+          showNotification('❌ Recording too small!', 'error');
           cleanupStream();
           isCurrentlyRecording = false;
           recordingLock = false;
+          pendingSave = false;
           return;
         }
         
@@ -623,48 +671,63 @@ async function startRecording() {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T').join('_').split('.')[0];
         const filename = `WhatsApp_Call_${timestamp}.webm`;
         
-        recordingStatus.textContent = 'Saving recording... ⏳';
+        // Show conversion progress notification
+        const conversionNotif = showPersistentNotification(
+          '⏳ Converting to MP4... Please wait, do not close the app!',
+          'info'
+        );
+        
+        recordingStatus.textContent = 'Converting to MP4 ⏳';
         recordingStatus.style.color = 'var(--accent-warning)';
         
-        console.log('💾 Saving:', filename);
+        // Estimate conversion time (rough estimate: 1 second per MB)
+        const estimatedSeconds = Math.ceil(blob.size / 1024 / 1024);
+        let countdown = estimatedSeconds;
+        
+        const countdownInterval = setInterval(() => {
+          if (countdown > 0) {
+            recordingStatus.textContent = `Converting to MP4... ~${countdown}s ⏳`;
+            countdown--;
+          }
+        }, 1000);
         
         const saved = await window.electronAPI.saveRecording(uint8Array, filename);
         
+        clearInterval(countdownInterval);
+        conversionNotif.remove();
+        
         if (saved) {
-          console.log('✅ Saved successfully:', saved);
           recordingStatus.textContent = 'Not Recording';
           recordingStatus.style.color = 'var(--text-secondary)';
           
-          const fileExt = saved.endsWith('.mp4') ? 'MP4' : 'WebM';
           const savedFilename = saved.split(/[/\\]/).pop();
-          
-          alert(`✅ Recording saved as ${fileExt}! (${sizeMB} MB)\n\n${savedFilename}`);
+          showNotification(`✅ Saved as MP4! (${sizeMB} MB)`, 'success');
           loadRecordings();
         } else {
-          throw new Error('Save returned null');
+          throw new Error('Save failed');
         }
       } catch (saveError) {
         console.error('❌ Save failed:', saveError);
-        alert('❌ Failed to save:\n\n' + saveError.message);
-        recordingStatus.textContent = 'Failed ❌';
+        showNotification('❌ Failed to save: ' + saveError.message, 'error');
+        recordingStatus.textContent = 'Save Failed ❌';
         recordingStatus.style.color = 'var(--accent-danger)';
+      } finally {
+        cleanupStream();
+        window.electronAPI.recordingStopped();
+        isCurrentlyRecording = false;
+        recordingLock = false;
+        pendingSave = false;
       }
-      
-      cleanupStream();
-      window.electronAPI.recordingStopped();
-      isCurrentlyRecording = false;
-      recordingLock = false;
     };
     
     mediaRecorder.onerror = (event) => {
       console.error('❌ MediaRecorder error:', event.error);
-      alert('❌ Recording error:\n\n' + event.error.message);
       cleanupStream();
       isCurrentlyRecording = false;
       recordingLock = false;
+      pendingSave = false;
     };
     
-    console.log('🔴 STARTING RECORDING NOW!');
     mediaRecorder.start(1000);
     recordingStartTime = Date.now();
     isCurrentlyRecording = true;
@@ -675,66 +738,40 @@ async function startRecording() {
     startTimer();
     window.electronAPI.recordingStarted();
     
-    console.log('═══════════════════════════════════════');
     console.log('✅ Recording started successfully!');
-    console.log('🎙️ Active sources:');
-    if (systemAudioTracks.length > 0) console.log('  ✅ System audio (participants)');
-    if (micStream) console.log('  ✅ Microphone (you)');
-    console.log('═══════════════════════════════════════');
     
   } catch (error) {
     console.error('❌ Recording failed:', error);
-    console.error('Stack:', error.stack);
-    alert('❌ Failed to start recording:\n\n' + error.message);
     cleanupStream();
     isCurrentlyRecording = false;
     recordingLock = false;
+    pendingSave = false;
   }
 }
 
 function stopRecording() {
-  console.log('⏹️ Stopping recording...');
+  console.log('⏹️ stopRecording() called');
   
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
-    mediaRecorder.stop();
-    statusIndicator.classList.remove('recording');
-    if (isMonitoring) {
-      statusIndicator.querySelector('.status-text').textContent = 'Monitoring';
-    }
-    stopTimer();
-  }
-}
-
-async function forceStopRecording() {
-  console.log('🛑 Force stopping recording...');
-  
-  if (mediaRecorder) {
-    if (mediaRecorder.state === 'recording') {
-      mediaRecorder.stop();
-    }
-    mediaRecorder = null;
+  if (!mediaRecorder || mediaRecorder.state !== 'recording') {
+    console.log('⚠️ No active recording to stop');
+    return;
   }
   
-  cleanupStream();
-  stopTimer();
-  
-  isCurrentlyRecording = false;
-  recordingLock = false;
-  recordingStartScheduled = false;
+  console.log('✅ Stopping mediaRecorder...');
+  mediaRecorder.stop();
   
   statusIndicator.classList.remove('recording');
-  recordingStatus.textContent = 'Not Recording';
-  recordingStatus.style.color = 'var(--text-secondary)';
+  if (isMonitoring) {
+    statusIndicator.querySelector('.status-text').textContent = 'Monitoring';
+  }
+  stopTimer();
 }
 
 function cleanupStream() {
   console.log('🧹 Cleaning up streams...');
   
   if (currentStream) {
-    currentStream.getTracks().forEach(track => {
-      track.stop();
-      console.log('🛑 Stopped:', track.kind, track.label);
-    });
+    currentStream.getTracks().forEach(track => track.stop());
     currentStream = null;
   }
   
@@ -756,8 +793,6 @@ function cleanupStream() {
   }
   
   audioDestination = null;
-  
-  console.log('✅ Cleanup complete');
 }
 
 function startTimer() {
