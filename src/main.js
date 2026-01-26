@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain, desktopCapturer, systemPreferences, shell, 
 const path = require('path');
 const fs = require('fs');
 const ffmpeg = require('fluent-ffmpeg');
-const ffmpegPath = require('ffmpeg-static');
+const ffmpegPath = require('ffmpeg-static').replace('app.asar', 'app.asar.unpacked');
 const { exec } = require('child_process');
 const util = require('util');
 const execPromise = util.promisify(exec);
@@ -32,7 +32,7 @@ function createWindow() {
       enableRemoteModule: false,
       webSecurity: true
     },
-    icon: path.join(__dirname, '../assets/icon.png'),
+ icon: path.join( "icon.ico"),
     resizable: true,
     maximizable: true,
     minimizable: true
